@@ -1,12 +1,13 @@
 """
 Complete LLM Training Pipeline from Chapter 5 of 'Build a Large Language Model From Scratch'
+Extended for numerical sequence training
 
 This script implements the full pipeline for training an LLM from scratch including:
 - GPT model definition
-- Data loading and preprocessing
+- Numerical data loading and preprocessing
 - Loss calculation and evaluation
 - Training loop with validation
-- Text generation with temperature and top-k sampling
+- Sequence generation with temperature and top-k sampling
 - Model saving/loading functionality
 """
 
@@ -332,15 +333,54 @@ def evaluate_model(model, train_loader, val_loader, device, eval_iter):
 def generate_and_print_sample(model, tokenizer, device, start_context):
     model.eval()
     context_size = model.pos_emb.weight.shape[0]
-    encoded = text_to_token_ids(start_context, tokenizer).to(device)
-    with torch.no_grad():
-        token_ids = generate_text_simple(
-            model=model, idx=encoded,
-            max_new_tokens=50, context_size=context_size
-        )
-    decoded_text = token_ids_to_text(token_ids, tokenizer)
-    print(decoded_text.replace("\n", " "))  # Compact print format
+
+    # For numerical sequences, we might not have a tokenizer
+    if tokenizer is not None:
+        encoded = text_to_token_ids(start_context, tokenizer).to(device)
+        with torch.no_grad():
+            token_ids = generate_text_simple(
+                model=model, idx=encoded,
+                max_new_tokens=50, context_size=context_size
+            )
+        decoded_text = token_ids_to_text(token_ids, tokenizer)
+        print(decoded_text.replace("\n", " "))  # Compact print format
+    else:
+        # For numerical data, we'll create a simple starting sequence
+        # Using the first few tokens from the training data as a starting point
+        start_tokens = [0, 1, 2]  # Placeholder tokens for numerical sequence
+        encoded = torch.tensor([start_tokens], dtype=torch.long).to(device)
+        with torch.no_grad():
+            token_ids = generate_text_simple(
+                model=model, idx=encoded,
+                max_new_tokens=20, context_size=context_size  # Generate a 20-token sequence
+            )
+        print(f"Generated sequence: {token_ids[0].tolist()}")
+
     model.train()
+
+
+def generate_numerical_sequence(model, start_sequence, max_new_tokens, device):
+    """Generate a numerical sequence using the trained model"""
+    model.eval()
+    context_size = model.pos_emb.weight.shape[0]
+
+    # Convert start sequence to tensor
+    encoded = torch.tensor([start_sequence], dtype=torch.long).to(device)
+
+    with torch.no_grad():
+        generated_tokens = generate(
+            model=model,
+            idx=encoded,
+            max_new_tokens=max_new_tokens,
+            context_size=context_size,
+            top_k=50,
+            temperature=0.7
+        )
+
+    # Convert back to coordinates if needed
+    generated_sequence = generated_tokens[0].tolist()
+    model.train()
+    return generated_sequence
 
 
 def train_model_simple(model, train_loader, val_loader, optimizer, device, num_epochs,
@@ -371,7 +411,7 @@ def train_model_simple(model, train_loader, val_loader, optimizer, device, num_e
                 print(f"Ep {epoch+1} (Step {global_step:06d}): "
                       f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}")
 
-        # Print a sample text after each epoch
+        # Print a sample after each epoch (text for text data, sequence for numerical data)
         generate_and_print_sample(
             model, tokenizer, device, start_context
         )
@@ -418,6 +458,123 @@ def get_device():
     return device
 
 
+def load_numerical_dataset():
+    """Load the numerical dataset from dataset.txt file"""
+    file_path = "dataset/dataset.txt"
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Dataset file not found at {file_path}")
+
+    print(f"Loading numerical dataset from {file_path}")
+
+    sequences = []
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                # Replace 'nan' with None first, then replace None with a valid number
+                safe_line = line.replace('nan', 'float("nan")')
+
+                # Parse each line as a Python list structure
+                import ast
+                try:
+                    # Use eval instead of literal_eval since literal_eval doesn't support float("nan")
+                    parsed_line = eval(safe_line)
+                    label = parsed_line[0]
+                    coords = parsed_line[1]
+                    # Check if any coordinates are NaN and skip if so
+                    has_nan = any(x != x or y != y for x, y in coords)  # x != x is True only if x is NaN
+                    if not has_nan:
+                        # Convert to a format that includes both the label and the sequence
+                        sequences.append((label, coords))
+                except Exception as e:
+                    print(f"Error parsing line: {line}, Error: {e}")
+
+    print(f"Loaded {len(sequences)} sequences from dataset (NaN entries filtered out)")
+    return sequences
+
+
+def normalize_coordinates(sequences, min_val=-100, max_val=100):
+    """Normalize coordinate values to a range suitable for tokenization"""
+    # Find min and max across all coordinates
+    all_coords = []
+    for label, seq in sequences:
+        for x, y in seq:
+            all_coords.extend([x, y])
+
+    data_min = min(all_coords)
+    data_max = max(all_coords)
+
+    normalized_sequences = []
+    for label, seq in sequences:
+        normalized_seq = []
+        for x, y in seq:
+            # Normalize to [0, 1] then scale to desired range
+            norm_x = (x - data_min) / (data_max - data_min) * (max_val - min_val) + min_val
+            norm_y = (y - data_min) / (data_max - data_min) * (max_val - min_val) + min_val
+            normalized_seq.append((norm_x, norm_y))
+        normalized_sequences.append((label, normalized_seq))
+
+    return normalized_sequences
+
+
+def numerical_sequence_to_tokens(sequences, num_bins=200):  # Reduced number of bins
+    """Convert normalized numerical sequences to token IDs"""
+    tokenized_sequences = []
+
+    for label, seq in sequences:
+        token_seq = []
+        for x, y in seq:
+            # Quantize x and y coordinates to discrete bins separately
+            # Using smaller number of bins since data is in limited range
+            x_bin = min(int((x + 100) / 200 * num_bins), num_bins - 1)
+            y_bin = min(int((y + 100) / 200 * num_bins), num_bins - 1)
+
+            # Add both x and y as separate tokens in sequence
+            # This prevents the vocab size from exploding
+            token_seq.extend([x_bin, y_bin])
+        tokenized_sequences.append(token_seq)
+
+    return tokenized_sequences
+
+
+class NumericalSequenceDataset(Dataset):
+    """Dataset class for numerical sequence data"""
+    def __init__(self, sequences, context_length):
+        self.sequences = sequences
+        self.context_length = context_length
+        self.input_ids = []
+        self.target_ids = []
+
+        # Create input-target pairs from sequences
+        for seq in self.sequences:
+            # Create overlapping chunks of context_length
+            for i in range(len(seq) - context_length):
+                input_chunk = seq[i:i + context_length]
+                target_chunk = seq[i + 1:i + context_length + 1]
+                self.input_ids.append(torch.tensor(input_chunk, dtype=torch.long))
+                self.target_ids.append(torch.tensor(target_chunk, dtype=torch.long))
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        return self.input_ids[idx], self.target_ids[idx]
+
+
+def create_numerical_dataloader(sequences, batch_size=4, context_length=32, shuffle=True, drop_last=True, num_workers=0):
+    """Create dataloader for numerical sequence data"""
+    # Ensure context_length is appropriate for coordinate sequences
+    # Each coordinate pair becomes 2 tokens, so adjust accordingly
+    dataset = NumericalSequenceDataset(sequences, context_length)
+
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, num_workers=num_workers
+    )
+
+    return dataloader
+
+
 def download_the_verdict():
     """Download the The Verdict dataset used in the book"""
     file_path = "the-verdict.txt"
@@ -440,69 +597,74 @@ def download_the_verdict():
 
 def main():
     """Main training function"""
-    print("Starting LLM training pipeline...")
+    print("Starting LLM training pipeline with numerical dataset...")
 
-    # Configuration for the GPT model (124M parameter model)
-    GPT_CONFIG_124M = {
-        "vocab_size": 50257,     # Vocabulary size
-        "context_length": 256,   # Shortened context length for this example
-        "emb_dim": 768,          # Embedding dimension
-        "n_heads": 12,           # Number of attention heads
-        "n_layers": 12,          # Number of layers
-        "drop_rate": 0.1,        # Dropout rate
-        "qkv_bias": False        # Query-key-value bias
+    # Configuration for the GPT model adapted for numerical sequences
+    # With separate tokens for x and y, vocab size is just the number of bins + small buffer
+    num_bins = 200  # Number of bins for quantization
+    vocab_size = num_bins + 50  # Add buffer to vocab size
+
+    GPT_CONFIG_NUMERICAL = {
+        "vocab_size": vocab_size,        # More reasonable vocab size
+        "context_length": 32,            # Increased for coordinate pairs (20 points = 40 tokens, use 32 for context)
+        "emb_dim": 128,                  # Reduced embedding dimension for numerical data
+        "n_heads": 8,                    # Reduced number of attention heads
+        "n_layers": 4,                   # Reduced number of layers for faster training
+        "drop_rate": 0.1,                # Dropout rate
+        "qkv_bias": False                # Query-key-value bias
     }
+
+    print(f"Model config: {GPT_CONFIG_NUMERICAL}")
 
     # Get device
     device = get_device()
 
-    # Download and prepare the training data
-    print("Downloading training data...")
-    text_data = download_the_verdict()
+    # Load and prepare the numerical training data
+    print("Loading numerical training data...")
+    raw_sequences = load_numerical_dataset()
 
-    # Initialize tokenizer
-    tokenizer = tiktoken.get_encoding("gpt2")
+    # Normalize coordinates
+    print("Normalizing coordinates...")
+    normalized_sequences = normalize_coordinates(raw_sequences)
 
-    # Calculate total characters and tokens
-    total_characters = len(text_data)
-    total_tokens = len(tokenizer.encode(text_data))
+    # Convert to tokens
+    print("Converting sequences to tokens...")
+    tokenized_sequences = numerical_sequence_to_tokens(normalized_sequences, num_bins=num_bins)
 
-    print(f"Characters: {total_characters}")
-    print(f"Tokens: {total_tokens}")
+    print(f"Total sequences: {len(tokenized_sequences)}")
+    print(f"Sample sequence length: {len(tokenized_sequences[0]) if tokenized_sequences else 0}")
 
     # Split the dataset into train and validation sets
     train_ratio = 0.90
-    split_idx = int(train_ratio * len(text_data))
-    train_data = text_data[:split_idx]
-    val_data = text_data[split_idx:]
+    split_idx = int(train_ratio * len(tokenized_sequences))
+    train_sequences = tokenized_sequences[:split_idx]
+    val_sequences = tokenized_sequences[split_idx:]
 
-    # Create data loaders
+    # Create data loaders for numerical sequences
     torch.manual_seed(123)
 
-    train_loader = create_dataloader_v1(
-        train_data,
-        batch_size=2,
-        max_length=GPT_CONFIG_124M["context_length"],
-        stride=GPT_CONFIG_124M["context_length"],
+    train_loader = create_numerical_dataloader(
+        train_sequences,
+        batch_size=4,
+        context_length=GPT_CONFIG_NUMERICAL["context_length"],
         drop_last=True,
         shuffle=True,
         num_workers=0
     )
 
-    val_loader = create_dataloader_v1(
-        val_data,
-        batch_size=2,
-        max_length=GPT_CONFIG_124M["context_length"],
-        stride=GPT_CONFIG_124M["context_length"],
+    val_loader = create_numerical_dataloader(
+        val_sequences,
+        batch_size=4,
+        context_length=GPT_CONFIG_NUMERICAL["context_length"],
         drop_last=False,
         shuffle=False,
         num_workers=0
     )
 
-    # Initialize the model
+    # Initialize the model with numerical config
     print("Initializing model...")
     torch.manual_seed(123)
-    model = GPTModel(GPT_CONFIG_124M)
+    model = GPTModel(GPT_CONFIG_NUMERICAL)
     model.to(device)
 
     # Print initial loss before training
@@ -521,11 +683,11 @@ def main():
     print("Starting training...")
     start_time = time.time()
 
-    num_epochs = 10
+    num_epochs = 5  # Reduced epochs for initial testing
     train_losses, val_losses, tokens_seen = train_model_simple(
         model, train_loader, val_loader, optimizer, device,
-        num_epochs=num_epochs, eval_freq=5, eval_iter=5,
-        start_context="Every effort moves you", tokenizer=tokenizer
+        num_epochs=num_epochs, eval_freq=3, eval_iter=3,
+        start_context="0 0 0", tokenizer=None  # Using placeholder context
     )
 
     end_time = time.time()
@@ -536,28 +698,17 @@ def main():
     epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
     plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
 
-    # Generate text with the trained model
-    print("\nGenerating text with the trained model...")
-    model.eval()
-    with torch.no_grad():
-        token_ids = generate(
-            model=model,
-            idx=text_to_token_ids("Every effort moves you", tokenizer).to(device),
-            max_new_tokens=25,
-            context_size=GPT_CONFIG_124M["context_length"],
-            top_k=25,
-            temperature=1.4
-        )
-
-    print("Output text:")
-    print(token_ids_to_text(token_ids, tokenizer))
+    # For numerical sequences, we don't generate text in the traditional sense
+    # Instead, we can generate a sequence of coordinates
+    print("\nLLM training pipeline with numerical data completed!")
 
     # Save the model
     print("\nSaving trained model...")
-    torch.save(model.state_dict(), "trained_gpt_model.pth")
-    print("Model saved as 'trained_gpt_model.pth'")
+    torch.save(model.state_dict(), "trained_numerical_gpt_model.pth")
+    print("Model saved as 'trained_numerical_gpt_model.pth'")
 
-    print("\nLLM training pipeline completed!")
+    # Demonstrate generating a sequence (this would need a custom function for numerical data)
+    print("Model is ready for sequence generation!")
 
 
 def load_model(model_path, config):
