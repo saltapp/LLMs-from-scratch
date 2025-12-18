@@ -7,20 +7,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-from training_llm import load_model, predict_class, get_device, load_numerical_dataset
-
-# Define the same configuration as used in training
-num_bins = 200  # Number of bins for quantization
-GPT_CONFIG_CLASSIFICATION = {
-    "vocab_size": num_bins + 50,        # vocab size with buffer
-    "context_length": 64,            # Context length for coordinate pairs
-    "emb_dim": 128,                  # Embedding dimension for numerical data
-    "n_heads": 8,                    # Number of attention heads
-    "n_layers": 4,                   # Number of layers
-    "drop_rate": 0.1,                # Dropout rate
-    "qkv_bias": False                # Query-key-value bias
-}
+from llm_train import load_model, predict_class, get_device, load_numerical_dataset, GPT_CONFIG_CLASSIFICATION
 
 # %% [markdown]
 # ## 1. Model Loading and Basic Information
