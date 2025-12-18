@@ -1,13 +1,12 @@
 """
-Complete LLM Training Pipeline from Chapter 5 of 'Build a Large Language Model From Scratch'
-Extended for numerical sequence training
+Complete LLM Classification Pipeline from Chapter 5 of 'Build a Large Language Model From Scratch'
+Extended for numerical sequence classification
 
-This script implements the full pipeline for training an LLM from scratch including:
-- GPT model definition
+This script implements the full pipeline for training a classification LLM from scratch including:
+- GPT-based model with classification head
 - Numerical data loading and preprocessing
-- Loss calculation and evaluation
-- Training loop with validation
-- Sequence generation with temperature and top-k sampling
+- Binary classification training
+- Model evaluation and prediction
 - Model saving/loading functionality
 """
 
@@ -161,7 +160,8 @@ class GPTModel(nn.Module):
             *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
 
         self.final_norm = LayerNorm(cfg["emb_dim"])
-        self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
+        # For classification, we add a classifier head that takes the pooled representation
+        self.classifier_head = nn.Linear(cfg["emb_dim"], 2)  # 2 classes: 0 and 1
 
     def forward(self, in_idx):
         batch_size, seq_len = in_idx.shape
@@ -171,7 +171,11 @@ class GPTModel(nn.Module):
         x = self.drop_emb(x)
         x = self.trf_blocks(x)
         x = self.final_norm(x)
-        logits = self.out_head(x)
+
+        # Use the representation of the last token for classification
+        # or could use mean pooling across all tokens
+        last_token_repr = x[:, -1, :]  # Take the last token representation
+        logits = self.classifier_head(last_token_repr)  # Shape: (batch_size, 2)
         return logits
 
 
@@ -250,11 +254,12 @@ def token_ids_to_text(token_ids, tokenizer):
     return tokenizer.decode(flat.tolist())
 
 
-# Loss calculation utilities from chapter 5
+# Loss calculation utilities for classification
 def calc_loss_batch(input_batch, target_batch, model, device):
     input_batch, target_batch = input_batch.to(device), target_batch.to(device)
     logits = model(input_batch)
-    loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+    # For classification, target_batch should be class indices (not next token prediction)
+    loss = torch.nn.functional.cross_entropy(logits, target_batch)
     return loss
 
 
@@ -326,35 +331,65 @@ def evaluate_model(model, train_loader, val_loader, device, eval_iter):
     with torch.no_grad():
         train_loss = calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
         val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+
+        # Calculate accuracy
+        val_acc = calc_accuracy_loader(val_loader, model, device, num_batches=eval_iter)
     model.train()
-    return train_loss, val_loss
+    return train_loss, val_loss, val_acc
 
 
-def generate_and_print_sample(model, tokenizer, device, start_context):
+def calc_accuracy_loader(data_loader, model, device, num_batches=None):
     model.eval()
-    context_size = model.pos_emb.weight.shape[0]
+    correct_predictions, total_predictions = 0, 0
 
-    # For numerical sequences, we might not have a tokenizer
-    if tokenizer is not None:
-        encoded = text_to_token_ids(start_context, tokenizer).to(device)
-        with torch.no_grad():
-            token_ids = generate_text_simple(
-                model=model, idx=encoded,
-                max_new_tokens=50, context_size=context_size
-            )
-        decoded_text = token_ids_to_text(token_ids, tokenizer)
-        print(decoded_text.replace("\n", " "))  # Compact print format
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
     else:
-        # For numerical data, we'll create a simple starting sequence
-        # Using the first few tokens from the training data as a starting point
-        start_tokens = [0, 1, 2]  # Placeholder tokens for numerical sequence
-        encoded = torch.tensor([start_tokens], dtype=torch.long).to(device)
-        with torch.no_grad():
-            token_ids = generate_text_simple(
-                model=model, idx=encoded,
-                max_new_tokens=20, context_size=context_size  # Generate a 20-token sequence
-            )
-        print(f"Generated sequence: {token_ids[0].tolist()}")
+        num_batches = min(num_batches, len(data_loader))
+
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+            with torch.no_grad():
+                logits = model(input_batch)  # Shape: (batch_size, 2)
+            predicted_labels = torch.argmax(logits, dim=1)  # Shape: (batch_size,)
+            correct_predictions += (predicted_labels == target_batch).sum().item()
+            total_predictions += target_batch.size(0)
+        else:
+            break
+    model.train()
+    return correct_predictions / total_predictions
+
+
+def print_model_predictions(model, val_loader, device, num_examples=3):
+    """Print model predictions on validation examples for classification"""
+    model.eval()
+    print("Model predictions on validation examples:")
+    count = 0
+
+    with torch.no_grad():
+        for input_batch, target_batch in val_loader:
+            if count >= num_examples:
+                break
+
+            input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+            logits = model(input_batch)
+            probabilities = torch.softmax(logits, dim=1)
+            predicted_labels = torch.argmax(probabilities, dim=1)  # Shape: (batch_size,)
+
+            batch_size = input_batch.size(0)
+            for i in range(min(batch_size, num_examples - count)):
+                true_label = target_batch[i].item()
+                pred_label = predicted_labels[i].item()
+                confidence = probabilities[i][pred_label].item()
+
+                print(f"  Example {count+1}: True label={true_label}, Predicted={pred_label}, Confidence={confidence:.3f}")
+                count += 1
+
+                if count >= num_examples:
+                    break
 
     model.train()
 
@@ -384,9 +419,10 @@ def generate_numerical_sequence(model, start_sequence, max_new_tokens, device):
 
 
 def train_model_simple(model, train_loader, val_loader, optimizer, device, num_epochs,
-                       eval_freq, eval_iter, start_context, tokenizer):
-    # Initialize lists to track losses and tokens seen
+                       eval_freq, eval_iter):
+    # Initialize lists to track losses, tokens seen, and accuracies
     train_losses, val_losses, track_tokens_seen = [], [], []
+    val_accuracies = []
     tokens_seen, global_step = 0, -1
 
     # Main training loop
@@ -403,20 +439,19 @@ def train_model_simple(model, train_loader, val_loader, optimizer, device, num_e
 
             # Optional evaluation step
             if global_step % eval_freq == 0:
-                train_loss, val_loss = evaluate_model(
+                train_loss, val_loss, val_acc = evaluate_model(
                     model, train_loader, val_loader, device, eval_iter)
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
+                val_accuracies.append(val_acc)
                 track_tokens_seen.append(tokens_seen)
                 print(f"Ep {epoch+1} (Step {global_step:06d}): "
-                      f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}")
+                      f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}, Val acc {val_acc:.3f}")
 
-        # Print a sample after each epoch (text for text data, sequence for numerical data)
-        generate_and_print_sample(
-            model, tokenizer, device, start_context
-        )
+        # Print model predictions after each epoch
+        print_model_predictions(model, val_loader, device, num_examples=3)
 
-    return train_losses, val_losses, track_tokens_seen
+    return train_losses, val_losses, track_tokens_seen, val_accuracies
 
 
 def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
@@ -468,6 +503,7 @@ def load_numerical_dataset():
     print(f"Loading numerical dataset from {file_path}")
 
     sequences = []
+    labels = []
     with open(file_path, "r", encoding="utf-8") as file:
         for line in file:
             line = line.strip()
@@ -486,12 +522,26 @@ def load_numerical_dataset():
                     has_nan = any(x != x or y != y for x, y in coords)  # x != x is True only if x is NaN
                     if not has_nan:
                         # Convert to a format that includes both the label and the sequence
-                        sequences.append((label, coords))
+                        labels.append(label)
+
+                        # Convert coordinates to tokens
+                        token_seq = []
+                        for x, y in coords:
+                            # Quantize x and y coordinates to discrete bins separately
+                            # Using smaller number of bins since data is in limited range [-100, 100]
+                            x_bin = min(int((x + 100) / 200 * 200), 199)
+                            y_bin = min(int((y + 100) / 200 * 200), 199)
+
+                            # Add both x and y as separate tokens in sequence
+                            # This prevents the vocab size from exploding
+                            token_seq.extend([x_bin, y_bin])
+                        sequences.append(token_seq)
                 except Exception as e:
                     print(f"Error parsing line: {line}, Error: {e}")
 
     print(f"Loaded {len(sequences)} sequences from dataset (NaN entries filtered out)")
-    return sequences
+    print(f"Label distribution: {dict(zip(*torch.unique(torch.tensor(labels), return_counts=True)))}")
+    return sequences, labels
 
 
 def normalize_coordinates(sequences, min_val=-100, max_val=100):
@@ -538,35 +588,38 @@ def numerical_sequence_to_tokens(sequences, num_bins=200):  # Reduced number of 
     return tokenized_sequences
 
 
-class NumericalSequenceDataset(Dataset):
-    """Dataset class for numerical sequence data"""
-    def __init__(self, sequences, context_length):
+class NumericalSequenceClassificationDataset(Dataset):
+    """Dataset class for numerical sequence classification data"""
+    def __init__(self, sequences, labels, context_length):
         self.sequences = sequences
+        self.labels = labels
         self.context_length = context_length
-        self.input_ids = []
-        self.target_ids = []
-
-        # Create input-target pairs from sequences
-        for seq in self.sequences:
-            # Create overlapping chunks of context_length
-            for i in range(len(seq) - context_length):
-                input_chunk = seq[i:i + context_length]
-                target_chunk = seq[i + 1:i + context_length + 1]
-                self.input_ids.append(torch.tensor(input_chunk, dtype=torch.long))
-                self.target_ids.append(torch.tensor(target_chunk, dtype=torch.long))
 
     def __len__(self):
-        return len(self.input_ids)
+        return len(self.sequences)
 
     def __getitem__(self, idx):
-        return self.input_ids[idx], self.target_ids[idx]
+        seq = self.sequences[idx]
+        label = self.labels[idx]
+
+        # Ensure sequence is the right length
+        if len(seq) > self.context_length:
+            # Truncate if too long
+            seq = seq[:self.context_length]
+        elif len(seq) < self.context_length:
+            # Pad if too short
+            padding_length = self.context_length - len(seq)
+            seq = seq + [0] * padding_length  # Pad with zeros
+
+        input_ids = torch.tensor(seq, dtype=torch.long)
+        target = torch.tensor(label, dtype=torch.long)  # The class label (0 or 1)
+
+        return input_ids, target
 
 
-def create_numerical_dataloader(sequences, batch_size=4, context_length=32, shuffle=True, drop_last=True, num_workers=0):
-    """Create dataloader for numerical sequence data"""
-    # Ensure context_length is appropriate for coordinate sequences
-    # Each coordinate pair becomes 2 tokens, so adjust accordingly
-    dataset = NumericalSequenceDataset(sequences, context_length)
+def create_classification_dataloader(sequences, labels, batch_size=4, context_length=64, shuffle=True, drop_last=False, num_workers=0):
+    """Create dataloader for numerical sequence classification data"""
+    dataset = NumericalSequenceClassificationDataset(sequences, labels, context_length)
 
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, num_workers=num_workers
@@ -597,16 +650,16 @@ def download_the_verdict():
 
 def main():
     """Main training function"""
-    print("Starting LLM training pipeline with numerical dataset...")
+    print("Starting LLM classification training pipeline with numerical dataset...")
 
-    # Configuration for the GPT model adapted for numerical sequences
+    # Configuration for the GPT model adapted for classification
     # With separate tokens for x and y, vocab size is just the number of bins + small buffer
     num_bins = 200  # Number of bins for quantization
     vocab_size = num_bins + 50  # Add buffer to vocab size
 
-    GPT_CONFIG_NUMERICAL = {
+    GPT_CONFIG_CLASSIFICATION = {
         "vocab_size": vocab_size,        # More reasonable vocab size
-        "context_length": 32,            # Increased for coordinate pairs (20 points = 40 tokens, use 32 for context)
+        "context_length": 64,            # Increased for longer coordinate sequences (up to 20 coordinate pairs = 40 tokens)
         "emb_dim": 128,                  # Reduced embedding dimension for numerical data
         "n_heads": 8,                    # Reduced number of attention heads
         "n_layers": 4,                   # Reduced number of layers for faster training
@@ -614,57 +667,55 @@ def main():
         "qkv_bias": False                # Query-key-value bias
     }
 
-    print(f"Model config: {GPT_CONFIG_NUMERICAL}")
+    print(f"Model config: {GPT_CONFIG_CLASSIFICATION}")
 
     # Get device
     device = get_device()
 
     # Load and prepare the numerical training data
     print("Loading numerical training data...")
-    raw_sequences = load_numerical_dataset()
+    sequences, labels = load_numerical_dataset()
 
-    # Normalize coordinates
-    print("Normalizing coordinates...")
-    normalized_sequences = normalize_coordinates(raw_sequences)
-
-    # Convert to tokens
-    print("Converting sequences to tokens...")
-    tokenized_sequences = numerical_sequence_to_tokens(normalized_sequences, num_bins=num_bins)
-
-    print(f"Total sequences: {len(tokenized_sequences)}")
-    print(f"Sample sequence length: {len(tokenized_sequences[0]) if tokenized_sequences else 0}")
+    print(f"Total sequences: {len(sequences)}")
+    print(f"Sample sequence length: {len(sequences[0]) if sequences else 0}")
+    print(f"Label distribution: {dict(zip(*torch.unique(torch.tensor(labels), return_counts=True))) if labels else 'N/A'}")
 
     # Split the dataset into train and validation sets
     train_ratio = 0.90
-    split_idx = int(train_ratio * len(tokenized_sequences))
-    train_sequences = tokenized_sequences[:split_idx]
-    val_sequences = tokenized_sequences[split_idx:]
+    split_idx = int(train_ratio * len(sequences))
+    train_sequences = sequences[:split_idx]
+    val_sequences = sequences[split_idx:]
 
-    # Create data loaders for numerical sequences
+    train_labels = labels[:split_idx]
+    val_labels = labels[split_idx:]
+
+    # Create data loaders for numerical sequences with labels
     torch.manual_seed(123)
 
-    train_loader = create_numerical_dataloader(
+    train_loader = create_classification_dataloader(
         train_sequences,
+        train_labels,
         batch_size=4,
-        context_length=GPT_CONFIG_NUMERICAL["context_length"],
-        drop_last=True,
+        context_length=GPT_CONFIG_CLASSIFICATION["context_length"],
+        drop_last=False,  # Don't drop last batch as it may be small but still valuable for classification
         shuffle=True,
         num_workers=0
     )
 
-    val_loader = create_numerical_dataloader(
+    val_loader = create_classification_dataloader(
         val_sequences,
+        val_labels,
         batch_size=4,
-        context_length=GPT_CONFIG_NUMERICAL["context_length"],
+        context_length=GPT_CONFIG_CLASSIFICATION["context_length"],
         drop_last=False,
         shuffle=False,
         num_workers=0
     )
 
-    # Initialize the model with numerical config
+    # Initialize the model with classification config
     print("Initializing model...")
     torch.manual_seed(123)
-    model = GPTModel(GPT_CONFIG_NUMERICAL)
+    model = GPTModel(GPT_CONFIG_CLASSIFICATION)
     model.to(device)
 
     # Print initial loss before training
@@ -676,6 +727,10 @@ def main():
     print(f"Initial Training loss: {train_loss}")
     print(f"Initial Validation loss: {val_loss}")
 
+    # Calculate initial accuracy
+    initial_acc = calc_accuracy_loader(val_loader, model, device)
+    print(f"Initial Validation accuracy: {initial_acc}")
+
     # Set up optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
 
@@ -684,10 +739,9 @@ def main():
     start_time = time.time()
 
     num_epochs = 5  # Reduced epochs for initial testing
-    train_losses, val_losses, tokens_seen = train_model_simple(
+    train_losses, val_losses, tokens_seen, val_accuracies = train_model_simple(
         model, train_loader, val_loader, optimizer, device,
-        num_epochs=num_epochs, eval_freq=3, eval_iter=3,
-        start_context="0 0 0", tokenizer=None  # Using placeholder context
+        num_epochs=num_epochs, eval_freq=30, eval_iter=3
     )
 
     end_time = time.time()
@@ -698,17 +752,51 @@ def main():
     epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
     plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
 
-    # For numerical sequences, we don't generate text in the traditional sense
-    # Instead, we can generate a sequence of coordinates
-    print("\nLLM training pipeline with numerical data completed!")
+    # Plot accuracy
+    plot_accuracy(epochs_tensor, val_accuracies)
+
+    print("\nLLM classification training pipeline with numerical data completed!")
 
     # Save the model
     print("\nSaving trained model...")
-    torch.save(model.state_dict(), "trained_numerical_gpt_model.pth")
-    print("Model saved as 'trained_numerical_gpt_model.pth'")
+    torch.save(model.state_dict(), "trained_numerical_gpt_classification_model.pth")
+    print("Model saved as 'trained_numerical_gpt_classification_model.pth'")
 
-    # Demonstrate generating a sequence (this would need a custom function for numerical data)
-    print("Model is ready for sequence generation!")
+    # Demonstrate classification predictions
+    print("\nTesting classification predictions:")
+    model.eval()
+    for i in range(min(5, len(val_sequences))):
+        seq = val_sequences[i]
+        true_label = val_labels[i]
+        pred_class, confidence, all_probs = predict_class(model, seq, device)
+        print(f"Sequence {i+1}: True label={true_label}, Predicted={pred_class}, Confidence={confidence:.3f}")
+        print(f"  All probabilities: Class 0: {all_probs[0]:.3f}, Class 1: {all_probs[1]:.3f}")
+
+
+def predict_class(model, input_sequence, device):
+    """Predict the class (0 or 1) for a numerical sequence"""
+    model.eval()
+    with torch.no_grad():
+        # Convert input to tensor and add batch dimension
+        input_tensor = torch.tensor([input_sequence], dtype=torch.long).to(device)
+        logits = model(input_tensor)  # Shape: (1, 2)
+        probabilities = torch.softmax(logits, dim=1)  # Shape: (1, 2)
+        predicted_class = torch.argmax(probabilities, dim=1).item()  # 0 or 1
+        confidence = probabilities[0][predicted_class].item()  # Confidence in prediction
+
+    return predicted_class, confidence, probabilities[0].tolist()
+
+
+def plot_accuracy(epochs_tensor, val_accuracies):
+    plt.figure(figsize=(5, 3))
+    plt.plot(epochs_tensor, val_accuracies, label="Validation Accuracy")
+    plt.xlabel("Epochs")
+    plt.ylabel("Accuracy")
+    plt.legend(loc="lower right")
+    plt.title("Validation Accuracy Over Time")
+    plt.grid(True, alpha=0.3)
+    plt.savefig("classification-accuracy-plot.pdf")
+    plt.show()
 
 
 def load_model(model_path, config):
