@@ -7,10 +7,24 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from llm_train import load_model, predict_class, get_device, load_numerical_dataset, GPT_CONFIG_CLASSIFICATION
+from llm_train import load_model, predict_class, get_device, load_numerical_dataset
 
 # %% [markdown]
 # ## 1. Model Loading and Basic Information
+num_bins = 200  # Number of bins for quantization
+vocab_size = num_bins + 50  # Add buffer to vocab size
+
+GPT_CONFIG_CLASSIFICATION = {
+    "vocab_size": vocab_size,        # More reasonable vocab size
+    "context_length": 64,            # Increased for longer coordinate sequences (up to 20 coordinate pairs = 40 tokens)
+    "emb_dim": 128,                  # Reduced embedding dimension for numerical data
+    "classifier_num": 5,             # Number of classes to classify
+    "n_heads": 8,                    # Reduced number of attention heads
+    "n_layers": 4,                   # Reduced number of layers for faster training
+    "drop_rate": 0.1,                # Dropout rate
+    "qkv_bias": False,               # Query-key-value bias
+    "balance_classes": False          # Whether to balance classes in dataset
+}
 
 # %%
 # Load the trained model

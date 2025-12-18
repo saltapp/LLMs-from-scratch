@@ -660,258 +660,260 @@ def load_model(model_path, config):
     model.eval()
     return model
 
-# %%
-print("Starting LLM classification training pipeline with numerical dataset...")
-
-# Configuration for the GPT model adapted for classification
-# With separate tokens for x and y, vocab size is just the number of bins + small buffer
-num_bins = 200  # Number of bins for quantization
-vocab_size = num_bins + 50  # Add buffer to vocab size
-
-GPT_CONFIG_CLASSIFICATION = {
-    "vocab_size": vocab_size,        # More reasonable vocab size
-    "context_length": 64,            # Increased for longer coordinate sequences (up to 20 coordinate pairs = 40 tokens)
-    "emb_dim": 128,                  # Reduced embedding dimension for numerical data
-    "classifier_num": 5,             # Number of classes to classify
-    "n_heads": 8,                    # Reduced number of attention heads
-    "n_layers": 4,                   # Reduced number of layers for faster training
-    "drop_rate": 0.1,                # Dropout rate
-    "qkv_bias": False,               # Query-key-value bias
-    "balance_classes": False          # Whether to balance classes in dataset
-}
-
-print(f"Model config: {GPT_CONFIG_CLASSIFICATION}")
-
-# Get device
-device = get_device()
-
 
 # %%
-# Load and prepare the numerical training data
-print("Loading numerical training data...")
-sequences, labels = load_numerical_dataset()
+if __name__ == "__main__":
+    print("Starting LLM classification training pipeline with numerical dataset...")
 
-print(f"Total sequences: {len(sequences)}")
-print(f"Sample sequence length: {len(sequences[0]) if sequences else 0}")
-print(f"Label distribution: {dict(zip(*torch.unique(torch.tensor(labels), return_counts=True))) if labels else 'N/A'}")
+    # Configuration for the GPT model adapted for classification
+    # With separate tokens for x and y, vocab size is just the number of bins + small buffer
+    num_bins = 200  # Number of bins for quantization
+    vocab_size = num_bins + 50  # Add buffer to vocab size
 
-# %%
-# Split the dataset into train and validation sets based on classifier_num parameter
-import random
+    GPT_CONFIG_CLASSIFICATION = {
+        "vocab_size": vocab_size,        # More reasonable vocab size
+        "context_length": 64,            # Increased for longer coordinate sequences (up to 20 coordinate pairs = 40 tokens)
+        "emb_dim": 128,                  # Reduced embedding dimension for numerical data
+        "classifier_num": 5,             # Number of classes to classify
+        "n_heads": 8,                    # Reduced number of attention heads
+        "n_layers": 4,                   # Reduced number of layers for faster training
+        "drop_rate": 0.1,                # Dropout rate
+        "qkv_bias": False,               # Query-key-value bias
+        "balance_classes": False          # Whether to balance classes in dataset
+    }
 
-# Combine sequences and labels to maintain alignment during processing
-data_pairs = list(zip(sequences, labels))
+    print(f"Model config: {GPT_CONFIG_CLASSIFICATION}")
 
-# Filter out sequences that have NaN values or length < 20
-filtered_pairs = []
-for seq, label in data_pairs:
-    # Check if sequence length is less than 20
-    if len(seq) < 20:
-        continue  # Skip this sequence
+    # Get device
+    device = get_device()
 
-    # Check for NaN values in the sequence
-    has_nan = False
-    for token in seq:
-        if token != token:  # This checks for NaN (nan != nan is True)
-            has_nan = True
-            break
 
-    if not has_nan:
-        filtered_pairs.append((seq, label))
+    # %%
+    # Load and prepare the numerical training data
+    print("Loading numerical training data...")
+    sequences, labels = load_numerical_dataset()
 
-print(f"Total sequences after filtering: {len(filtered_pairs)}")
+    print(f"Total sequences: {len(sequences)}")
+    print(f"Sample sequence length: {len(sequences[0]) if sequences else 0}")
+    print(f"Label distribution: {dict(zip(*torch.unique(torch.tensor(labels), return_counts=True))) if labels else 'N/A'}")
 
-# Identify all unique labels in the dataset
-unique_labels = sorted(list(set(label for _, label in filtered_pairs)))
-print(f"Unique labels in dataset: {unique_labels}")
+    # %%
+    # Split the dataset into train and validation sets based on classifier_num parameter
+    import random
 
-# Shuffle the filtered pairs
-random.shuffle(filtered_pairs)
+    # Combine sequences and labels to maintain alignment during processing
+    data_pairs = list(zip(sequences, labels))
 
-# Separate back into sequences and labels
-all_sequences = [pair[0] for pair in filtered_pairs]
-all_labels = [pair[1] for pair in filtered_pairs]
+    # Filter out sequences that have NaN values or length < 20
+    filtered_pairs = []
+    for seq, label in data_pairs:
+        # Check if sequence length is less than 20
+        if len(seq) < 20:
+            continue  # Skip this sequence
 
-# Group data by label for potential balancing
-label_data_groups = {}
-for label in unique_labels:
-    label_data_groups[label] = [(seq, label_val) for seq, label_val in filtered_pairs if label_val == label]
+        # Check for NaN values in the sequence
+        has_nan = False
+        for token in seq:
+            if token != token:  # This checks for NaN (nan != nan is True)
+                has_nan = True
+                break
 
-# Print original counts
-for label in unique_labels:
-    print(f"Label {label} count: {len(label_data_groups[label])}")
+        if not has_nan:
+            filtered_pairs.append((seq, label))
 
-# Conditionally balance the labels based on config parameter
-if GPT_CONFIG_CLASSIFICATION.get("balance_classes", True):
-    # Balance the labels by taking the minimum count across all available labels
-    min_count = min([len(label_data_groups[label]) for label in unique_labels]) if unique_labels else 0
+    print(f"Total sequences after filtering: {len(filtered_pairs)}")
 
-    # Trim each label group to the minimum count to ensure balanced dataset
-    balanced_data_groups = {}
+    # Identify all unique labels in the dataset
+    unique_labels = sorted(list(set(label for _, label in filtered_pairs)))
+    print(f"Unique labels in dataset: {unique_labels}")
+
+    # Shuffle the filtered pairs
+    random.shuffle(filtered_pairs)
+
+    # Separate back into sequences and labels
+    all_sequences = [pair[0] for pair in filtered_pairs]
+    all_labels = [pair[1] for pair in filtered_pairs]
+
+    # Group data by label for potential balancing
+    label_data_groups = {}
     for label in unique_labels:
-        balanced_data_groups[label] = label_data_groups[label][:min_count]
+        label_data_groups[label] = [(seq, label_val) for seq, label_val in filtered_pairs if label_val == label]
 
-    # Print balanced counts
+    # Print original counts
     for label in unique_labels:
-        print(f"After balancing - Label {label} count: {len(balanced_data_groups[label])}")
+        print(f"Label {label} count: {len(label_data_groups[label])}")
 
-    # Shuffle each balanced label group separately
-    for label in unique_labels:
-        random.shuffle(balanced_data_groups[label])
+    # Conditionally balance the labels based on config parameter
+    if GPT_CONFIG_CLASSIFICATION.get("balance_classes", True):
+        # Balance the labels by taking the minimum count across all available labels
+        min_count = min([len(label_data_groups[label]) for label in unique_labels]) if unique_labels else 0
 
-    # Calculate split points for balanced distribution in train/validation
-    train_ratio = 0.90
-    num_classes = len(unique_labels)
-    total_balanced = min_count * num_classes  # Total samples after balancing
-    train_count_per_label = int(train_ratio * min_count)
+        # Trim each label group to the minimum count to ensure balanced dataset
+        balanced_data_groups = {}
+        for label in unique_labels:
+            balanced_data_groups[label] = label_data_groups[label][:min_count]
 
-    # Split each balanced label group
-    train_data = []
-    val_data = []
-    for label in unique_labels:
-        label_train_data = balanced_data_groups[label][:train_count_per_label]
-        label_val_data = balanced_data_groups[label][train_count_per_label:]
-        train_data.extend(label_train_data)
-        val_data.extend(label_val_data)
+        # Print balanced counts
+        for label in unique_labels:
+            print(f"After balancing - Label {label} count: {len(balanced_data_groups[label])}")
 
-    print("Dataset balancing enabled: All classes have equal representation")
-else:
-    # Use original data distribution without balancing
-    print("Dataset balancing disabled: Using original class distribution")
+        # Shuffle each balanced label group separately
+        for label in unique_labels:
+            random.shuffle(balanced_data_groups[label])
 
-    # Calculate split points based on original distribution
-    train_ratio = 0.90
-    train_data = []
-    val_data = []
-    for label in unique_labels:
-        label_data = label_data_groups[label]
-        random.shuffle(label_data)  # Shuffle the original data for this label
-        label_train_count = int(train_ratio * len(label_data))
-        label_train_data = label_data[:label_train_count]
-        label_val_data = label_data[label_train_count:]
-        train_data.extend(label_train_data)
-        val_data.extend(label_val_data)
+        # Calculate split points for balanced distribution in train/validation
+        train_ratio = 0.90
+        num_classes = len(unique_labels)
+        total_balanced = min_count * num_classes  # Total samples after balancing
+        train_count_per_label = int(train_ratio * min_count)
 
-    print("Using original dataset distribution without balancing")
+        # Split each balanced label group
+        train_data = []
+        val_data = []
+        for label in unique_labels:
+            label_train_data = balanced_data_groups[label][:train_count_per_label]
+            label_val_data = balanced_data_groups[label][train_count_per_label:]
+            train_data.extend(label_train_data)
+            val_data.extend(label_val_data)
 
-# Shuffle the train and validation sets to mix the labels
-random.shuffle(train_data)
-random.shuffle(val_data)
+        print("Dataset balancing enabled: All classes have equal representation")
+    else:
+        # Use original data distribution without balancing
+        print("Dataset balancing disabled: Using original class distribution")
 
-# Separate sequences and labels for train and validation
-train_sequences = [pair[0] for pair in train_data]
-train_labels = [pair[1] for pair in train_data]
-val_sequences = [pair[0] for pair in val_data]
-val_labels = [pair[1] for pair in val_data]
+        # Calculate split points based on original distribution
+        train_ratio = 0.90
+        train_data = []
+        val_data = []
+        for label in unique_labels:
+            label_data = label_data_groups[label]
+            random.shuffle(label_data)  # Shuffle the original data for this label
+            label_train_count = int(train_ratio * len(label_data))
+            label_train_data = label_data[:label_train_count]
+            label_val_data = label_data[label_train_count:]
+            train_data.extend(label_train_data)
+            val_data.extend(label_val_data)
 
-print(f"Training set: {len(train_sequences)} sequences, Label distribution: {dict(zip(*torch.unique(torch.tensor(train_labels), return_counts=True)))}")
-print(f"Validation set: {len(val_sequences)} sequences, Label distribution: {dict(zip(*torch.unique(torch.tensor(val_labels), return_counts=True)))}")
+        print("Using original dataset distribution without balancing")
 
-# Verify that the number of classes matches the model configuration
-actual_num_classes = len(torch.unique(torch.tensor(train_labels + val_labels)))
-expected_num_classes = GPT_CONFIG_CLASSIFICATION["classifier_num"]
-if actual_num_classes != expected_num_classes:
-    print(f"WARNING: Dataset has {actual_num_classes} classes, but model is configured for {expected_num_classes} classes.")
-    print(f"Consider updating GPT_CONFIG_CLASSIFICATION['classifier_num'] to {actual_num_classes}")
-    # Update the config to match the actual number of classes in the dataset
-    GPT_CONFIG_CLASSIFICATION["classifier_num"] = actual_num_classes
-    print(f"Updated classifier_num to {actual_num_classes}")
+    # Shuffle the train and validation sets to mix the labels
+    random.shuffle(train_data)
+    random.shuffle(val_data)
 
-# %%
-# Create data loaders for numerical sequences with labels
-torch.manual_seed(123)
+    # Separate sequences and labels for train and validation
+    train_sequences = [pair[0] for pair in train_data]
+    train_labels = [pair[1] for pair in train_data]
+    val_sequences = [pair[0] for pair in val_data]
+    val_labels = [pair[1] for pair in val_data]
 
-train_loader = create_classification_dataloader(
-    train_sequences,
-    train_labels,
-    batch_size=4,
-    context_length=GPT_CONFIG_CLASSIFICATION["context_length"],
-    drop_last=False,  # Don't drop last batch as it may be small but still valuable for classification
-    shuffle=True,
-    num_workers=0
-)
+    print(f"Training set: {len(train_sequences)} sequences, Label distribution: {dict(zip(*torch.unique(torch.tensor(train_labels), return_counts=True)))}")
+    print(f"Validation set: {len(val_sequences)} sequences, Label distribution: {dict(zip(*torch.unique(torch.tensor(val_labels), return_counts=True)))}")
 
-val_loader = create_classification_dataloader(
-    val_sequences,
-    val_labels,
-    batch_size=4,
-    context_length=GPT_CONFIG_CLASSIFICATION["context_length"],
-    drop_last=False,
-    shuffle=False,
-    num_workers=0
-)
+    # Verify that the number of classes matches the model configuration
+    actual_num_classes = len(torch.unique(torch.tensor(train_labels + val_labels)))
+    expected_num_classes = GPT_CONFIG_CLASSIFICATION["classifier_num"]
+    if actual_num_classes != expected_num_classes:
+        print(f"WARNING: Dataset has {actual_num_classes} classes, but model is configured for {expected_num_classes} classes.")
+        print(f"Consider updating GPT_CONFIG_CLASSIFICATION['classifier_num'] to {actual_num_classes}")
+        # Update the config to match the actual number of classes in the dataset
+        GPT_CONFIG_CLASSIFICATION["classifier_num"] = actual_num_classes
+        print(f"Updated classifier_num to {actual_num_classes}")
 
-# %%
-# Initialize the model with classification config
-print("Initializing model...")
-torch.manual_seed(123)
-model = GPTModel(GPT_CONFIG_CLASSIFICATION)
-model.to(device)
+    # %%
+    # Create data loaders for numerical sequences with labels
+    torch.manual_seed(123)
 
-# %%
-# Print initial loss before training
-print("Calculating initial loss...")
-with torch.no_grad():  # Disable gradient tracking for efficiency because we are not training, yet
-    train_loss = calc_loss_loader(train_loader, model, device)
-    val_loss = calc_loss_loader(val_loader, model, device)
+    train_loader = create_classification_dataloader(
+        train_sequences,
+        train_labels,
+        batch_size=4,
+        context_length=GPT_CONFIG_CLASSIFICATION["context_length"],
+        drop_last=False,  # Don't drop last batch as it may be small but still valuable for classification
+        shuffle=True,
+        num_workers=0
+    )
 
-print(f"Initial Training loss: {train_loss}")
-print(f"Initial Validation loss: {val_loss}")
+    val_loader = create_classification_dataloader(
+        val_sequences,
+        val_labels,
+        batch_size=4,
+        context_length=GPT_CONFIG_CLASSIFICATION["context_length"],
+        drop_last=False,
+        shuffle=False,
+        num_workers=0
+    )
 
+    # %%
+    # Initialize the model with classification config
+    print("Initializing model...")
+    torch.manual_seed(123)
+    model = GPTModel(GPT_CONFIG_CLASSIFICATION)
+    model.to(device)
 
-# %%
-# Calculate initial accuracy
-initial_acc = calc_accuracy_loader(val_loader, model, device)
-print(f"Initial Validation accuracy: {initial_acc}")
+    # %%
+    # Print initial loss before training
+    print("Calculating initial loss...")
+    with torch.no_grad():  # Disable gradient tracking for efficiency because we are not training, yet
+        train_loss = calc_loss_loader(train_loader, model, device)
+        val_loss = calc_loss_loader(val_loader, model, device)
 
-# %%
-# Set up optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
-
-# Start training
-print("Starting training...")
-start_time = time.time()
-
-num_epochs = 5  # Reduced epochs for initial testing
-train_losses, val_losses, tokens_seen, val_accuracies = train_model_simple(
-    model, train_loader, val_loader, optimizer, device,
-    num_epochs=num_epochs, eval_freq=30, eval_iter=3
-)
-
-end_time = time.time()
-execution_time_minutes = (end_time - start_time) / 60
-print(f"Training completed in {execution_time_minutes:.2f} minutes.")
-
-# %%
-# Plot losses
-epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
-plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
-
-# Plot accuracy
-plot_accuracy(epochs_tensor, val_accuracies)
-
-print("\nLLM classification training pipeline with numerical data completed!")
-
-# %%
-# Save the model
-print("\nSaving trained model...")
-torch.save(model.state_dict(), "trained_numerical_gpt_classification_model.pth")
-print("Model saved as 'trained_numerical_gpt_classification_model.pth'")
-
-# %%
-# Demonstrate classification predictions
-print("\nTesting classification predictions:")
-model.eval()
-for i in range(min(5, len(val_sequences))):
-    seq = val_sequences[i]
-    true_label = val_labels[i]
-    pred_class, confidence, all_probs = predict_class(model, seq, device)
-    print(f"Sequence {i+1}: True label={true_label}, Predicted={pred_class}, Confidence={confidence:.3f}")
-
-    # Print all class probabilities dynamically
-    prob_str = ", ".join([f"Class {j}: {prob:.3f}" for j, prob in enumerate(all_probs)])
-    print(f"  All probabilities: {prob_str}")
+    print(f"Initial Training loss: {train_loss}")
+    print(f"Initial Validation loss: {val_loss}")
 
 
+    # %%
+    # Calculate initial accuracy
+    initial_acc = calc_accuracy_loader(val_loader, model, device)
+    print(f"Initial Validation accuracy: {initial_acc}")
 
-# %%
+    # %%
+    # Set up optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
+
+    # Start training
+    print("Starting training...")
+    start_time = time.time()
+
+    num_epochs = 5  # Reduced epochs for initial testing
+    train_losses, val_losses, tokens_seen, val_accuracies = train_model_simple(
+        model, train_loader, val_loader, optimizer, device,
+        num_epochs=num_epochs, eval_freq=30, eval_iter=3
+    )
+
+    end_time = time.time()
+    execution_time_minutes = (end_time - start_time) / 60
+    print(f"Training completed in {execution_time_minutes:.2f} minutes.")
+
+    # %%
+    # Plot losses
+    epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+    plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+
+    # Plot accuracy
+    plot_accuracy(epochs_tensor, val_accuracies)
+
+    print("\nLLM classification training pipeline with numerical data completed!")
+
+    # %%
+    # Save the model
+    print("\nSaving trained model...")
+    torch.save(model.state_dict(), "trained_numerical_gpt_classification_model.pth")
+    print("Model saved as 'trained_numerical_gpt_classification_model.pth'")
+
+    # %%
+    # Demonstrate classification predictions
+    print("\nTesting classification predictions:")
+    model.eval()
+    for i in range(min(5, len(val_sequences))):
+        seq = val_sequences[i]
+        true_label = val_labels[i]
+        pred_class, confidence, all_probs = predict_class(model, seq, device)
+        print(f"Sequence {i+1}: True label={true_label}, Predicted={pred_class}, Confidence={confidence:.3f}")
+
+        # Print all class probabilities dynamically
+        prob_str = ", ".join([f"Class {j}: {prob:.3f}" for j, prob in enumerate(all_probs)])
+        print(f"  All probabilities: {prob_str}")
+
+
+
+    # %%
